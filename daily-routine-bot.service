@@ -1,0 +1,25 @@
+[Unit]
+Description=DailyRoutine Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/daily_routine_bot
+Environment="PATH=/opt/daily_routine_bot/venv/bin"
+ExecStart=/opt/daily_routine_bot/venv/bin/python /opt/daily_routine_bot/bot.py
+Restart=always
+RestartSec=10
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=daily-routine-bot
+
+# Ограничения ресурсов
+MemoryLimit=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
+

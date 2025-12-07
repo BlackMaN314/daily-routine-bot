@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    container_name: daily_routine_bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data # Монтируем папку data для хранения SQLite базы данных
+    networks:
+      - daily_routine_network
+    # Раскомментируйте depends_on, если используете backend сервис
+    # depends_on:
+    #   - backend
+
+  # Пример конфигурации бэкенда (адаптируйте под ваш бэкенд)
+  # backend:
+  #   image: your-backend-image:latest
+  #   container_name: daily_routine_backend
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8000:8000"
+  #   networks:
+  #     - daily_routine_network
+
+networks:
+  daily_routine_network:
+    driver: bridge
