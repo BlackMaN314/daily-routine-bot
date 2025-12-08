@@ -1,9 +1,9 @@
-from aiogram import Router, types, Bot
+from aiogram import Router, types
+from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest
 from services.api import api
-from keyboards.main_menu import main_menu
-from handlers.start import get_user_photo_url
+from utils.helpers import get_user_photo_url
 
 router = Router()
 
@@ -12,17 +12,17 @@ def get_habits_keyboard(habits: list):
     for habit in habits:
         habit_id = habit.get("id")
         name = habit.get("name", "Неизвестно")
-        emoji = habit.get("emoji", "📌")
+        completed = habit.get("completed", False)
+        status_emoji = "✅" if completed else "❌"
         keyboard.append([InlineKeyboardButton(
-            text=f"{emoji} {name}",
+            text=f"{status_emoji} {name}",
             callback_data=f"habit_select:{habit_id}"
         )])
     keyboard.append([InlineKeyboardButton(text="➕ Создать привычку", callback_data="habit_create")])
     keyboard.append([InlineKeyboardButton(text="🔄 Обновить список", callback_data="refresh_habits")])
-    keyboard.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-@router.message(lambda m: m.text == "📅 Привычки на сегодня")
+@router.message(lambda m: m.text == "📅 Привычки")
 async def habits_today(message: types.Message):
     if not message.from_user:
         return await message.answer("❌ Не удалось определить пользователя")
@@ -39,13 +39,19 @@ async def habits_today(message: types.Message):
             "photo_url": photo_url
         })
     except Exception as e:
+        error_msg = str(e)
+        if "Не удалось подключиться к серверу" in error_msg:
+            text = f"📡 Не удалось подключиться к серверу\n\n{error_msg}\n\nПроверь:\n• Запущен ли бэкенд\n• Правильность BACKEND_URL в настройках"
+        elif "Токен" in error_msg or "токен" in error_msg:
+            text = "❌ Проблема с авторизацией\n\nПопробуй отправить /start для повторной регистрации"
+        else:
+            text = f"❌ Ошибка: {error_msg}\n\nПопробуй еще раз или обратись в поддержку."
+        
         return await message.answer(
-            "📡 Нет соединения с сервером\n\n"
-            "Проверь подключение к интернету и попробуй еще раз.",
+            text,
             reply_markup=types.ReplyKeyboardMarkup(
                 keyboard=[
-                    [types.KeyboardButton(text="🔄 Повторить")],
-                    [types.KeyboardButton(text="🔙 Главное меню")]
+                    [types.KeyboardButton(text="🔄 Повторить")]
                 ],
                 resize_keyboard=True
             )
@@ -54,40 +60,22 @@ async def habits_today(message: types.Message):
     habits = data.get("habits", [])
     if not habits:
         await message.answer(
-            "У тебя пока нет привычек 😔\n\n"
-            "Создай первую привычку прямо здесь!",
+            "📝 <b>У тебя пока нет привычек</b>\n\n"
+            "Создай первую привычку прямо здесь! 🚀",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="➕ Создать привычку", callback_data="habit_create")],
-                    [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")],
-                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                    [InlineKeyboardButton(text="👤 Личный кабинет", callback_data="profile")]
                 ]
-            )
+            ),
+            parse_mode="HTML"
         )
         return
 
-    text = "Твои привычки на сегодня:\n\n"
-    for h in habits:
-        icon = "✅" if h.get("completed") else "❌"
-        name = h.get("name", "Неизвестно")
-        progress = h.get("progress", 0)
-        goal = h.get("goal", 0)
-        unit = h.get("unit", "")
-        if unit:
-            text += f"{icon} {name} — {progress} / {goal} {unit}\n"
-        else:
-            text += f"{icon} {name} — {progress} / {goal}\n"
-
     await message.answer(
-        text,
-        reply_markup=types.ReplyKeyboardMarkup(
-            keyboard=[
-                [types.KeyboardButton(text="🔄 Обновить список")],
-                [types.KeyboardButton(text="📋 Выбрать привычку")],
-                [types.KeyboardButton(text="🏠 Главное меню")]
-            ],
-            resize_keyboard=True
-        )
+        "📋 <b>Твои привычки:</b>",
+        reply_markup=get_habits_keyboard(habits),
+        parse_mode="HTML"
     )
 
 @router.message(lambda m: m.text == "🔄 Обновить список")
@@ -96,44 +84,7 @@ async def refresh_habits(message: types.Message):
 
 @router.message(lambda m: m.text == "📋 Выбрать привычку")
 async def select_habit(message: types.Message):
-    if not message.from_user:
-        return await message.answer("❌ Не удалось определить пользователя")
-
-    user_id = message.from_user.id
-
-    try:
-        photo_url = await get_user_photo_url(message.bot, user_id)
-        data = await api.get("/habits/today", params={
-            "telegram_id": user_id,
-            "username": message.from_user.username,
-            "first_name": message.from_user.first_name,
-            "last_name": message.from_user.last_name,
-            "photo_url": photo_url
-        })
-        habits = data.get("habits", [])
-        
-        if not habits:
-            await message.answer(
-                "У тебя пока нет привычек 😔\n\n"
-                "Создай первую привычку прямо здесь!",
-                reply_markup=InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [InlineKeyboardButton(text="➕ Создать привычку", callback_data="habit_create")],
-                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
-                    ]
-                )
-            )
-            return
-
-        await message.answer(
-            "Выбери привычку:",
-            reply_markup=get_habits_keyboard(habits)
-        )
-    except Exception as e:
-        await message.answer(
-            f"❌ Ошибка при загрузке привычек: {e}",
-            reply_markup=main_menu()
-        )
+    await habits_today(message)
 
 @router.callback_query(lambda c: c.data == "refresh_habits")
 async def refresh_habits_callback(call: types.CallbackQuery):
@@ -157,24 +108,24 @@ async def refresh_habits_callback(call: types.CallbackQuery):
         
         if not habits:
             await call.message.edit_text(
-                "У тебя пока нет привычек 😔\n\n"
-                "Создай первую привычку прямо здесь!",
+                "📝 <b>У тебя пока нет привычек</b>\n\n"
+                "Создай первую привычку прямо здесь! 🚀",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="➕ Создать привычку", callback_data="habit_create")],
-                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                        [InlineKeyboardButton(text="➕ Создать привычку", callback_data="habit_create")]
                     ]
-                )
+                ),
+                parse_mode="HTML"
             )
             return
         
         try:
             await call.message.edit_text(
-                "Выбери привычку:",
-                reply_markup=get_habits_keyboard(habits)
+                "📋 <b>Твои привычки:</b>",
+                reply_markup=get_habits_keyboard(habits),
+                parse_mode="HTML"
             )
         except TelegramBadRequest as e:
-            # Если сообщение не изменилось, просто отвечаем на callback
             if "message is not modified" in str(e).lower():
                 await call.answer("Список уже актуален ✅")
             else:
@@ -185,8 +136,7 @@ async def refresh_habits_callback(call: types.CallbackQuery):
                 f"❌ Ошибка при загрузке привычек: {e}",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="refresh_habits")],
-                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                        [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="refresh_habits")]
                     ]
                 )
             )
@@ -198,9 +148,15 @@ async def refresh_habits_callback(call: types.CallbackQuery):
                 await call.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 @router.callback_query(lambda c: c.data and c.data.startswith("habit_select:"))
-async def show_habit_details(call: types.CallbackQuery):
+async def show_habit_details(call: types.CallbackQuery, state: FSMContext = None):
     if not call.data or not call.from_user:
         return await call.answer("❌ Ошибка", show_alert=True)
+    
+    try:
+        if state:
+            await state.clear()
+    except Exception:
+        pass
     
     habit_id = call.data.split(":")[1]
     user_id = call.from_user.id
@@ -225,13 +181,19 @@ async def show_habit_details(call: types.CallbackQuery):
         
         completed = habit.get("completed", False)
         
-        text = f"{emoji} {name}"
-        if unit:
-            text += f" {goal} {unit}"
-        text += f"\nПрогресс: {progress} / {goal}"
-        if unit:
-            text += f" {unit}"
-        text += f"\nСерия: {streak} дней 🔥"
+        status_icon = "✅" if completed else "⏳"
+        text = f"{status_icon} <b>{name}</b>\n"
+        
+        habit_type = habit.get("type", "boolean")
+        if habit_type == "quantity" and unit:
+            text += f"📊 Цель: {goal} {unit}\n"
+            text += f"📈 Прогресс: {progress} / {goal} {unit}\n"
+        elif habit_type == "quantity":
+            text += f"📊 Цель: {goal}\n"
+            text += f"📈 Прогресс: {progress} / {goal}\n"
+        
+        if streak > 0:
+            text += f"🔥 Серия: {streak} дней подряд"
         
         keyboard_buttons = []
         if completed:
@@ -240,16 +202,14 @@ async def show_habit_details(call: types.CallbackQuery):
             keyboard_buttons.append([InlineKeyboardButton(text="✅ Выполнить", callback_data=f"habit_complete:{habit_id}")])
         
         keyboard_buttons.extend([
-            [InlineKeyboardButton(text="📈 Статистика", callback_data=f"habit_stats:{habit_id}")],
             [InlineKeyboardButton(text="🗑️ Удалить привычку", callback_data=f"habit_delete:{habit_id}")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_today")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_today")]
         ])
         
         keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_buttons)
         
         try:
-            await call.message.edit_text(text, reply_markup=keyboard)
+            await call.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
         except TelegramBadRequest as e:
             if "message is not modified" in str(e).lower():
                 await call.answer("Информация уже актуальна ✅")
@@ -260,9 +220,15 @@ async def show_habit_details(call: types.CallbackQuery):
         await call.answer(f"❌ Ошибка: {e}", show_alert=True)
 
 @router.callback_query(lambda c: c.data == "back_today")
-async def back_to_today(call: types.CallbackQuery):
+async def back_to_today(call: types.CallbackQuery, state: FSMContext = None):
     if not call.from_user or not call.message:
         return await call.answer("❌ Ошибка", show_alert=True)
+    
+    try:
+        if state:
+            await state.clear()
+    except Exception:
+        pass
     
     await call.answer()
     
@@ -281,24 +247,24 @@ async def back_to_today(call: types.CallbackQuery):
         
         if not habits:
             await call.message.edit_text(
-                "У тебя пока нет привычек 😔\n\n"
-                "Создай первую привычку прямо здесь!",
+                "📝 <b>У тебя пока нет привычек</b>\n\n"
+                "Создай первую привычку прямо здесь! 🚀",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="➕ Создать привычку", callback_data="habit_create")],
-                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                        [InlineKeyboardButton(text="➕ Создать привычку", callback_data="habit_create")]
                     ]
-                )
+                ),
+                parse_mode="HTML"
             )
             return
         
         try:
             await call.message.edit_text(
-                "Выбери привычку:",
-                reply_markup=get_habits_keyboard(habits)
+                "📋 <b>Твои привычки:</b>",
+                reply_markup=get_habits_keyboard(habits),
+                parse_mode="HTML"
             )
         except TelegramBadRequest as e:
-            # Если сообщение не изменилось, просто отвечаем на callback
             if "message is not modified" in str(e).lower():
                 await call.answer("Список уже актуален ✅")
             else:
@@ -309,11 +275,9 @@ async def back_to_today(call: types.CallbackQuery):
                 f"❌ Ошибка при загрузке привычек: {e}",
                 reply_markup=InlineKeyboardMarkup(
                     inline_keyboard=[
-                        [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="back_today")],
-                        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                        [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="back_today")]
                     ]
                 )
             )
         except TelegramBadRequest:
-            # Если не удалось отредактировать, просто отвечаем
             await call.answer(f"❌ Ошибка: {e}", show_alert=True)

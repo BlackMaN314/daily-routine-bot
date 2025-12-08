@@ -4,8 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.exceptions import TelegramBadRequest
 from services.api import api
-from keyboards.main_menu import main_menu
-from handlers.start import get_user_photo_url
+from utils.helpers import get_user_photo_url
 
 router = Router()
 
@@ -13,8 +12,8 @@ router = Router()
 class HabitCreateStates(StatesGroup):
     waiting_for_title = State()
     waiting_for_type = State()
-    waiting_for_value = State()
     waiting_for_unit = State()
+    waiting_for_value = State()
 
 
 def get_habit_type_keyboard():
@@ -35,15 +34,16 @@ async def start_create_habit(call: types.CallbackQuery, state: FSMContext):
     
     if call.message:
         await call.message.edit_text(
-            "➕ Создание новой привычки\n\n"
-            "Введи название привычки (например: Читать книгу, Пить воду):\n\n"
+            "➕ <b>Создание новой привычки</b>\n\n"
+            "💬 Введи название привычки\n"
+            "Например: <i>Читать книгу</i>, <i>Пить воду</i>\n\n"
             "Или нажми '🔙 Отмена' для выхода.",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")],
-                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                    [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")]
                 ]
-            )
+            ),
+            parse_mode="HTML"
         )
 
 
@@ -57,7 +57,7 @@ async def process_title(message: types.Message, state: FSMContext):
         return
     
     menu_commands = [
-        "🏠 Главное меню", "📅 Привычки на сегодня", "⚙️ Настройки",
+        "🏠 Главное меню", "📅 Привычки", "⚙️ Настройки",
         "👤 Личный кабинет", "🔄 Обновить список", "📋 Выбрать привычку"
     ]
     
@@ -78,9 +78,10 @@ async def process_title(message: types.Message, state: FSMContext):
     await state.set_state(HabitCreateStates.waiting_for_type)
     
     await message.answer(
-        f"📝 Название: {title}\n\n"
-        "Выбери тип привычки:",
-        reply_markup=get_habit_type_keyboard()
+        f"📝 <b>Название:</b> {title}\n\n"
+        "📊 <b>Выбери тип привычки:</b>",
+        reply_markup=get_habit_type_keyboard(),
+        parse_mode="HTML"
     )
 
 
@@ -94,22 +95,35 @@ async def process_type(call: types.CallbackQuery, state: FSMContext):
     
     if habit_type == "boolean":
         await state.update_data(value=1, unit="")
-        await state.set_state(HabitCreateStates.waiting_for_unit)
         await finish_create_habit(call, state, call.bot)
     else:
-        await state.set_state(HabitCreateStates.waiting_for_value)
-        unit_hint = "минут" if habit_type == "time" else "страниц/литров/штук"
+        await state.set_state(HabitCreateStates.waiting_for_unit)
+        data = await state.get_data()
+        title = data.get("title", "")
+        
+        if habit_type == "time":
+            unit_buttons = [
+                [InlineKeyboardButton(text="⏱️ Минут", callback_data="habit_unit:минут")],
+                [InlineKeyboardButton(text="⏱️ Часов", callback_data="habit_unit:часов")],
+                [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")]
+            ]
+        else:
+            unit_buttons = [
+                [InlineKeyboardButton(text="📄 Страниц", callback_data="habit_unit:страниц")],
+                [InlineKeyboardButton(text="💧 Литров", callback_data="habit_unit:литров")],
+                [InlineKeyboardButton(text="🔢 Штук", callback_data="habit_unit:штук")],
+                [InlineKeyboardButton(text="👟 Шагов", callback_data="habit_unit:шагов")],
+                [InlineKeyboardButton(text="📚 Слов", callback_data="habit_unit:слов")],
+                [InlineKeyboardButton(text="✏️ Своя единица", callback_data="habit_unit_custom")],
+                [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")]
+            ]
+        
         await call.message.edit_text(
-            f"📝 Название: {(await state.get_data()).get('title')}\n"
-            f"📊 Тип: {'⏱️ По времени' if habit_type == 'time' else '🔢 По количеству'}\n\n"
-            f"Введи целевое значение (например: 30 {unit_hint}):\n\n"
-            "Или нажми '🔙 Отмена' для выхода.",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")],
-                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
-                ]
-            )
+            f"📝 <b>Название:</b> {title}\n"
+            f"📊 <b>Тип:</b> {'⏱️ По времени' if habit_type == 'time' else '🔢 По количеству'}\n\n"
+            f"📏 <b>Выбери единицу измерения:</b>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=unit_buttons),
+            parse_mode="HTML"
         )
         await call.answer()
 
@@ -120,13 +134,12 @@ async def process_value(message: types.Message, state: FSMContext):
         return
     
     menu_commands = [
-        "🏠 Главное меню", "📅 Привычки на сегодня", "⚙️ Настройки",
+        "🏠 Главное меню", "📅 Привычки", "⚙️ Настройки",
         "👤 Личный кабинет", "🔄 Обновить список", "📋 Выбрать привычку"
     ]
     
-    # Проверяем, что message.text существует
     if not message.text:
-        await message.answer("❌ Пожалуйста, введи название привычки")
+        await message.answer("❌ Пожалуйста, введи число")
         return
     
     if message.text in menu_commands:
@@ -146,40 +159,12 @@ async def process_value(message: types.Message, state: FSMContext):
         return
     
     await state.update_data(value=value)
-    await state.set_state(HabitCreateStates.waiting_for_unit)
-    
     data = await state.get_data()
+    title = data.get("title", "")
     habit_type = data.get("type", "count")
+    unit = data.get("unit", "")
     
-    # Кнопки для выбора единицы измерения в зависимости от типа
-    if habit_type == "time":
-        unit_buttons = [
-            [InlineKeyboardButton(text="⏱️ Минут", callback_data="habit_unit:минут")],
-            [InlineKeyboardButton(text="⏱️ Часов", callback_data="habit_unit:часов")],
-            [InlineKeyboardButton(text="⏱️ Секунд", callback_data="habit_unit:секунд")],
-            [InlineKeyboardButton(text="✏️ Своя единица", callback_data="habit_unit_custom")],
-            [InlineKeyboardButton(text="⏭️ Пропустить", callback_data="habit_unit_skip")],
-            [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")]
-        ]
-    else:  # count
-        unit_buttons = [
-            [InlineKeyboardButton(text="📄 Страниц", callback_data="habit_unit:страниц")],
-            [InlineKeyboardButton(text="💧 Литров", callback_data="habit_unit:литров")],
-            [InlineKeyboardButton(text="🔢 Штук", callback_data="habit_unit:штук")],
-            [InlineKeyboardButton(text="👟 Шагов", callback_data="habit_unit:шагов")],
-            [InlineKeyboardButton(text="📚 Слов", callback_data="habit_unit:слов")],
-            [InlineKeyboardButton(text="✏️ Своя единица", callback_data="habit_unit_custom")],
-            [InlineKeyboardButton(text="⏭️ Пропустить", callback_data="habit_unit_skip")],
-            [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")]
-        ]
-    
-    await message.answer(
-        f"📝 Название: {data.get('title')}\n"
-        f"📊 Тип: {'⏱️ По времени' if habit_type == 'time' else '🔢 По количеству'}\n"
-        f"🎯 Цель: {value}\n\n"
-        f"Выбери единицу измерения:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=unit_buttons)
-    )
+    await finish_create_habit_message(message, state, message.bot)
 
 
 @router.callback_query(lambda c: c.data and c.data.startswith("habit_unit:"))
@@ -189,20 +174,48 @@ async def select_unit(call: types.CallbackQuery, state: FSMContext):
     
     unit = call.data.split(":", 1)[1]
     await state.update_data(unit=unit)
-    await finish_create_habit(call, state, call.bot)
-    await call.answer()
-
-
-@router.callback_query(lambda c: c.data == "habit_unit_custom")
-async def custom_unit(call: types.CallbackQuery, state: FSMContext):
+    await state.set_state(HabitCreateStates.waiting_for_value)
+    
+    data = await state.get_data()
+    title = data.get("title", "")
+    habit_type = data.get("type", "count")
+    unit_hint = "минут" if habit_type == "time" else "страниц/литров/штук"
+    
     await call.message.edit_text(
-        "✏️ Введи свою единицу измерения (например: км, калорий, раз):\n\n"
+        f"📝 <b>Название:</b> {title}\n"
+        f"📊 <b>Тип:</b> {'⏱️ По времени' if habit_type == 'time' else '🔢 По количеству'}\n"
+        f"📏 <b>Единица:</b> {unit}\n\n"
+        f"💬 <b>Введи целевое значение</b>\n"
+        f"Например: <code>30</code> {unit_hint}\n\n"
         "Или нажми '🔙 Отмена' для выхода.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")]
             ]
-        )
+        ),
+        parse_mode="HTML"
+    )
+    await call.answer()
+
+
+@router.callback_query(lambda c: c.data == "habit_unit_custom")
+async def custom_unit(call: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    title = data.get("title", "")
+    habit_type = data.get("type", "count")
+    
+    await call.message.edit_text(
+        f"📝 <b>Название:</b> {title}\n"
+        f"📊 <b>Тип:</b> {'⏱️ По времени' if habit_type == 'time' else '🔢 По количеству'}\n\n"
+        "✏️ <b>Введи свою единицу измерения</b>\n"
+        "Например: <i>км</i>, <i>калорий</i>, <i>раз</i>\n\n"
+        "Или нажми '🔙 Отмена' для выхода.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")]
+            ]
+        ),
+        parse_mode="HTML"
     )
     await call.answer()
 
@@ -213,7 +226,7 @@ async def process_unit(message: types.Message, state: FSMContext):
         return
     
     menu_commands = [
-        "🏠 Главное меню", "📅 Привычки на сегодня", "⚙️ Настройки",
+        "🏠 Главное меню", "📅 Привычки", "⚙️ Настройки",
         "👤 Личный кабинет", "🔄 Обновить список", "📋 Выбрать привычку"
     ]
     
@@ -227,13 +240,27 @@ async def process_unit(message: types.Message, state: FSMContext):
         return
     
     await state.update_data(unit=unit)
-    await finish_create_habit_message(message, state, message.bot)
-
-
-@router.callback_query(lambda c: c.data == "habit_unit_skip")
-async def skip_unit(call: types.CallbackQuery, state: FSMContext):
-    await state.update_data(unit="")
-    await finish_create_habit(call, state, call.bot)
+    await state.set_state(HabitCreateStates.waiting_for_value)
+    
+    data = await state.get_data()
+    title = data.get("title", "")
+    habit_type = data.get("type", "count")
+    unit_hint = "минут" if habit_type == "time" else "страниц/литров/штук"
+    
+    await message.answer(
+        f"📝 <b>Название:</b> {title}\n"
+        f"📊 <b>Тип:</b> {'⏱️ По времени' if habit_type == 'time' else '🔢 По количеству'}\n"
+        f"📏 <b>Единица:</b> {unit}\n\n"
+        f"💬 <b>Введи целевое значение</b>\n"
+        f"Например: <code>30</code> {unit_hint}\n\n"
+        "Или нажми '🔙 Отмена' для выхода.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Отмена", callback_data="back_today")]
+            ]
+        ),
+        parse_mode="HTML"
+    )
 
 
 async def finish_create_habit(call: types.CallbackQuery, state: FSMContext, bot: Bot):
@@ -256,6 +283,12 @@ async def create_habit_from_data(user: types.User, data: dict, message_or_call, 
     value = data.get("value", 1)
     unit = data.get("unit", "")
     
+    send_value = value
+    send_unit = unit
+    if unit == "часов":
+        send_value = value * 60
+        send_unit = "минут"
+    
     photo_url = await get_user_photo_url(bot, user_id)
     
     try:
@@ -267,8 +300,8 @@ async def create_habit_from_data(user: types.User, data: dict, message_or_call, 
             "photo_url": photo_url,
             "title": title,
             "type": habit_type,
-            "value": value,
-            "unit": unit,
+            "value": send_value,
+            "unit": send_unit,
             "is_active": True,
             "is_beneficial": True
         })
@@ -285,12 +318,10 @@ async def create_habit_from_data(user: types.User, data: dict, message_or_call, 
         
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="📋 Посмотреть все привычки", callback_data="back_today")],
-                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                [InlineKeyboardButton(text="📋 Посмотреть все привычки", callback_data="back_today")]
             ]
         )
         
-        # Message нельзя редактировать, только CallbackQuery.message
         if isinstance(message_or_call, types.CallbackQuery) and message_or_call.message:
             try:
                 await message_or_call.message.edit_text(text, reply_markup=keyboard)
@@ -308,8 +339,7 @@ async def create_habit_from_data(user: types.User, data: dict, message_or_call, 
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data="habit_create")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_today")],
-                [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_today")]
             ]
         )
         
@@ -334,12 +364,9 @@ async def delete_habit(call: types.CallbackQuery):
     user_id = call.from_user.id
 
     try:
-        habit_data = await api.get(f"/habits/{habit_id}", params={
-            "telegram_id": user_id,
-            "username": call.from_user.username,
-            "first_name": call.from_user.first_name,
-            "last_name": call.from_user.last_name
-        })
+        from utils.helpers import get_user_params
+        params = await get_user_params(call.from_user, call.bot)
+        habit_data = await api.get(f"/habits/{habit_id}", params=params)
         habit = habit_data.get("habit", {})
         name = habit.get("name", "Привычка")
         emoji = habit.get("emoji", "📌")
@@ -370,19 +397,15 @@ async def confirm_delete_habit(call: types.CallbackQuery):
     user_id = call.from_user.id
     
     try:
-        await api.delete(f"/habits/delete/{habit_id}", params={
-            "telegram_id": user_id,
-            "username": call.from_user.username,
-            "first_name": call.from_user.first_name,
-            "last_name": call.from_user.last_name
-        })
+        from utils.helpers import get_user_params
+        params = await get_user_params(call.from_user, call.bot)
+        await api.delete(f"/habits/delete/{habit_id}", params=params)
         
         await call.message.edit_text(
             "✅ Привычка успешно удалена!",
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="📋 К списку привычек", callback_data="back_today")],
-                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
+                    [InlineKeyboardButton(text="📋 К списку привычек", callback_data="back_today")]
                 ]
             )
         )

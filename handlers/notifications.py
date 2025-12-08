@@ -1,8 +1,7 @@
 from aiogram import Router, types, Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from services.api import api
-from keyboards.main_menu import main_menu
-from handlers.start import get_user_photo_url
+from utils.helpers import get_user_photo_url
 
 router = Router()
 
@@ -16,11 +15,23 @@ def get_morning_notification_keyboard(habits: list):
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-async def send_morning_notification(bot: Bot, user_id: int):
+async def send_morning_notification(bot: Bot, user_id: int, user: types.User = None):
+    """Отправить утреннее уведомление пользователю"""
     try:
+        if user is None:
+            from aiogram.types import User as TelegramUser
+            user = TelegramUser(
+                id=user_id,
+                is_bot=False,
+                first_name=""
+            )
+        
         photo_url = await get_user_photo_url(bot, user_id)
         data = await api.get("/habits/today", params={
             "telegram_id": user_id,
+            "username": user.username,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
             "photo_url": photo_url
         })
         habits = data.get("habits", [])
@@ -42,7 +53,7 @@ async def send_morning_notification(bot: Bot, user_id: int):
             reply_markup=get_morning_notification_keyboard(habits)
         )
     except Exception:
-        pass  # Игнорируем ошибки при отправке уведомлений
+        pass
 
 
 @router.callback_query(lambda c: c.data == "morning_complete_all")
@@ -93,8 +104,7 @@ async def complete_all_morning(call: types.CallbackQuery):
             
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [InlineKeyboardButton(text="🔄 Обновить список", callback_data="back_today")],
-                    [InlineKeyboardButton(text="📅 Главное меню", callback_data="main_menu")]
+                    [InlineKeyboardButton(text="🔄 Обновить список", callback_data="back_today")]
                 ]
             )
             
@@ -113,7 +123,7 @@ async def open_list_morning(call: types.CallbackQuery):
     if call.message and call.from_user:
         from handlers.habits_today import habits_today
         message = call.message
-        message.text = "📅 Привычки на сегодня"
+        message.text = "📅 Привычки"
         await habits_today(message)
 
 
@@ -137,9 +147,7 @@ async def disable_morning_notifications(call: types.CallbackQuery):
         
         await call.message.edit_text(
             "🔕 Утренние напоминания отключены",
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text="🔙 Главное меню", callback_data="main_menu")]]
-            )
+            reply_markup=None
         )
         await call.answer()
     except Exception as e:

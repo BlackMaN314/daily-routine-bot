@@ -45,7 +45,7 @@ class TokenStorage:
             )
             row = await cursor.fetchone()
             if row:
-                return {
+                tokens_data = {
                     "access_token": row[0],
                     "refresh_token": row[1],
                     "user_id": row[2],
@@ -54,27 +54,38 @@ class TokenStorage:
                     "last_name": row[5],
                     "photo_url": row[6]
                 }
+                logger.debug(f"Токены найдены в БД для telegram_id={telegram_id}, access_token={'есть' if tokens_data['access_token'] else 'нет'}")
+                return tokens_data
+        logger.debug(f"Токены не найдены в БД для telegram_id={telegram_id}")
         return None
 
     async def _save_tokens_data(self, telegram_id: int, tokens_data: Dict):
         """Сохранить данные токенов в базу данных"""
         await self._init_db()
         async with aiosqlite.connect(self.db_path) as db:
+            access_token = tokens_data.get("access_token")
+            refresh_token = tokens_data.get("refresh_token")
+            user_id = tokens_data.get("user_id")
+            
+            if not access_token or not refresh_token:
+                logger.warning(f"Попытка сохранить неполные токены для telegram_id={telegram_id}")
+            
             await db.execute('''
                 INSERT OR REPLACE INTO tokens
                 (telegram_id, access_token, refresh_token, user_id, username, first_name, last_name, photo_url)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 telegram_id,
-                tokens_data.get("access_token"),
-                tokens_data.get("refresh_token"),
-                tokens_data.get("user_id"),
+                access_token,
+                refresh_token,
+                user_id,
                 tokens_data.get("username"),
                 tokens_data.get("first_name"),
                 tokens_data.get("last_name"),
                 tokens_data.get("photo_url")
             ))
             await db.commit()
+            logger.info(f"Токены сохранены в БД для telegram_id={telegram_id}, user_id={user_id}")
 
     async def save_tokens(self, telegram_id: int, access_token: str, refresh_token: str, user_id: Optional[int] = None,
                     username: Optional[str] = None, first_name: Optional[str] = None, last_name: Optional[str] = None,
@@ -130,6 +141,9 @@ class TokenStorage:
         if tokens_data:
             tokens_data["access_token"] = access_token
             await self._save_tokens_data(telegram_id, tokens_data)
+            logger.info(f"Access token обновлен в хранилище для telegram_id={telegram_id}")
+        else:
+            logger.warning(f"Не удалось обновить access token для telegram_id={telegram_id}: токены не найдены в БД")
 
     async def update_tokens(self, telegram_id: int, access_token: str, refresh_token: str):
         tokens_data = await self._get_tokens_data(telegram_id)

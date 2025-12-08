@@ -8,7 +8,7 @@ from services.api import api
 from services.token_storage import TokenStorage
 from services.notification_server import NotificationServer
 
-from handlers import start, main_menu, habits_today, habit_actions, habit_manage, settings, profile, notifications, week_progress
+from handlers import start, main_menu, habits_today, habit_actions, habit_manage, settings, profile, notifications
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,17 +23,32 @@ async def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не задан! Проверь .env файл")
 
-    logger.info(f"Запуск бота. Backend URL: {BACKEND_URL}")
+    if not BACKEND_URL:
+        logger.warning("BACKEND_URL не задан! Будет использовано значение по умолчанию: http://localhost:8000")
+    else:
+        logger.info(f"Запуск бота. Backend URL: {BACKEND_URL}")
 
     bot = Bot(token=BOT_TOKEN)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
+    
+    from middleware.throttling import ThrottlingMiddleware
+    dp.message.middleware(ThrottlingMiddleware(rate_limit=1.0))
+    dp.callback_query.middleware(ThrottlingMiddleware(rate_limit=0.5))
+    logger.info("Защита от спама активирована")
     
     bot_info = await bot.get_me()
     from services import token_storage as token_storage_module
     token_storage_module.token_storage = TokenStorage(bot_id=bot_info.id)
     await token_storage_module.token_storage._init_db()
     logger.info("База данных токенов инициализирована")
+    
+    logger.info("Проверка подключения к бэкенду...")
+    if await api.check_connection():
+        logger.info("✅ Подключение к бэкенду успешно")
+    else:
+        logger.warning(f"⚠️  Не удалось подключиться к бэкенду на {BACKEND_URL}")
+        logger.warning("Бот будет работать, но некоторые функции могут быть недоступны")
     dp.include_router(start.router)
     dp.include_router(main_menu.router)
     dp.include_router(habits_today.router)
@@ -42,7 +57,6 @@ async def main():
     dp.include_router(settings.router)
     dp.include_router(profile.router)
     dp.include_router(notifications.router)
-    dp.include_router(week_progress.router)
 
     notification_server = None
     try:

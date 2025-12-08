@@ -1,5 +1,6 @@
 import aiohttp
-import os
+from aiohttp import ClientConnectorError, ClientError, ClientTimeout
+import asyncio
 import hmac
 import hashlib
 import time
@@ -17,18 +18,35 @@ class API:
         self.session: Optional[aiohttp.ClientSession] = None
         self.user_id = BACKEND_USER_ID
         self.access_token = BACKEND_ACCESS_TOKEN
+        
+        if not self.base_url:
+            logger.warning("BACKEND_URL не задан! Используется значение по умолчанию")
+            self.base_url = "http://localhost:8000"
+        
+        logger.info(f"API инициализирован с базовым URL: {self.base_url}")
 
     async def _get_session(self, telegram_id: Optional[int] = None, force_new: bool = False, 
                           access_token: Optional[str] = None) -> aiohttp.ClientSession:
-        if force_new or self.session is None or self.session.closed:
+        should_recreate = (
+            force_new or 
+            self.session is None or 
+            self.session.closed or
+            (access_token is not None and self.session is not None and not self.session.closed)
+        )
+        
+        if should_recreate:
             if self.session and not self.session.closed:
                 await self.session.close()
             
             headers = {}
             if access_token:
                 headers["Authorization"] = f"Bearer {access_token}"
+                logger.debug(f"Создана сессия с токеном для telegram_id={telegram_id}")
             elif self.access_token:
                 headers["Authorization"] = f"Bearer {self.access_token}"
+                logger.debug("Создана сессия с токеном из конфигурации")
+            else:
+                logger.warning("Создана сессия БЕЗ токена авторизации!")
             
             self.session = aiohttp.ClientSession(headers=headers)
         return self.session
@@ -51,6 +69,13 @@ class API:
     async def register_telegram_user(self, telegram_id: int, username: Optional[str] = None, 
                                      first_name: Optional[str] = None, last_name: Optional[str] = None,
                                      photo_url: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Авторизация/регистрация пользователя через /login/telegram.
+        Этот endpoint проверяет существование пользователя в основной БД бэкенда:
+        - Если пользователь существует - обновляет информацию и возвращает токены
+        - Если пользователь не существует - создает нового и возвращает токены
+        Всегда возвращает токены для авторизованного пользователя.
+        """
         telegram_data = {
             "id": str(telegram_id),
             "auth_date": str(int(time.time())),
@@ -77,7 +102,11 @@ class API:
                     raise Exception(f"Ошибка авторизации: неверные данные Telegram. Ответ сервера: {error_text}")
                 response.raise_for_status()
                 auth_response = await response.json()
+        except aiohttp.ClientConnectorError as e:
+            logger.error(f"Не удалось подключиться к серверу {self.base_url} при регистрации: {e}")
+            raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
         except aiohttp.ClientError as e:
+            logger.error(f"Ошибка сети при регистрации: {e}")
             raise Exception(f"Ошибка сети при регистрации: {e}")
         except Exception as e:
             if "Ошибка" in str(e):
@@ -111,26 +140,31 @@ class API:
         try:
             refresh_token = await token_storage.get_refresh_token(telegram_id)
             if not refresh_token:
+                logger.warning(f"Refresh token не найден для telegram_id={telegram_id}")
                 return None
             
+            logger.info(f"Обновляем access token для telegram_id={telegram_id}")
             url = f"{self.base_url}/auth/getaccesstoken"
             session = aiohttp.ClientSession()
             
             try:
                 async with session.post(url, json={"refresh_token": refresh_token}) as response:
                     if response.status == 401:
+                        logger.warning(f"Refresh token недействителен для telegram_id={telegram_id} (401)")
                         return None
                     response.raise_for_status()
                     data = await response.json()
                     new_access_token = data.get("access_token")
                     if new_access_token:
                         await token_storage.update_access_token(telegram_id, new_access_token)
-                        logger.info(f"Access token обновлен для пользователя {telegram_id}")
+                        logger.info(f"Access token успешно обновлен для пользователя telegram_id={telegram_id}")
+                    else:
+                        logger.warning(f"Access token не получен в ответе для telegram_id={telegram_id}")
                     return new_access_token
             finally:
                 await session.close()
         except Exception as e:
-            logger.warning(f"Ошибка при обновлении access token: {e}")
+            logger.error(f"Ошибка при обновлении access token для telegram_id={telegram_id}: {e}", exc_info=True)
             return None
     
     async def _refresh_token_pair(self, telegram_id: int) -> Optional[Dict[str, str]]:
@@ -166,7 +200,9 @@ class API:
                               photo_url: Optional[str] = None) -> Optional[str]:
         access_token = await token_storage.get_access_token(telegram_id)
         if access_token:
+            logger.debug(f"Токен найден в хранилище для telegram_id={telegram_id}")
             return access_token
+        logger.info(f"Токен не найден для telegram_id={telegram_id}, регистрируем пользователя")
         try:
             auth_data = await self.register_telegram_user(
                 telegram_id=telegram_id,
@@ -191,12 +227,39 @@ class API:
                     last_name=last_name,
                     photo_url=photo_url
                 )
-                logger.info(f"Токены сохранены для пользователя {telegram_id}")
+                logger.info(f"Токены сохранены для пользователя telegram_id={telegram_id}, user_id={user_id}")
+            else:
+                logger.error(f"Токены не получены при регистрации для telegram_id={telegram_id}")
+                return None
             
             return access_token
         except Exception as e:
-            logger.error(f"Ошибка при регистрации пользователя {telegram_id}: {e}")
+            logger.error(f"Ошибка при регистрации пользователя {telegram_id}: {e}", exc_info=True)
             return None
+
+    async def check_connection(self) -> bool:
+        """
+        Проверить подключение к бэкенду
+        
+        Returns:
+            True если подключение успешно, False иначе
+        """
+        try:
+            session = aiohttp.ClientSession()
+            try:
+                async with session.get(f"{self.base_url}/users", timeout=ClientTimeout(total=5)) as response:
+                    return True
+            except asyncio.TimeoutError:
+                logger.error(f"Таймаут при подключении к {self.base_url}")
+                return False
+            except ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к {self.base_url}: {e}")
+                return False
+            finally:
+                await session.close()
+        except Exception as e:
+            logger.error(f"Ошибка при проверке подключения: {e}")
+            return False
 
     async def close(self):
         if self.session and not self.session.closed:
@@ -228,7 +291,10 @@ class API:
             access_token = await token_storage.get_access_token(telegram_id)
             user_id = await token_storage.get_user_id(telegram_id)
             
+            logger.debug(f"Получен токен из хранилища для telegram_id={telegram_id}: {'есть' if access_token else 'нет'}")
+            
             if not access_token:
+                logger.info(f"Токен не найден в хранилище для telegram_id={telegram_id}, регистрируем пользователя")
                 access_token = await self._get_user_token(
                     telegram_id=telegram_id,
                     username=username,
@@ -241,49 +307,76 @@ class API:
                 user_id = await token_storage.get_user_id(telegram_id)
                 if not user_id:
                     raise Exception("Не удалось получить user_id при регистрации. Попробуйте отправить /start")
+                logger.info(f"Пользователь зарегистрирован, токен получен для telegram_id={telegram_id}")
         
         if not access_token and self.access_token:
             access_token = self.access_token
+            logger.debug("Используется токен из конфигурации")
         
         if not access_token:
-            raise Exception("Токен не доступен")
+            logger.error(f"Токен не доступен для запроса {path}, telegram_id={telegram_id}")
+            raise Exception("Токен не доступен. Попробуйте отправить /start для регистрации")
 
         if self.session and not self.session.closed:
             await self.session.close()
             self.session = None
         
+        # Проверяем, что токен получен перед созданием сессии
+        if not access_token:
+            logger.warning(f"Токен не получен для telegram_id={telegram_id}, user_id={user_id}")
+            if telegram_id:
+                raise Exception("Токен не доступен. Попробуйте отправить /start для регистрации")
+            else:
+                raise Exception("Токен не доступен")
+        
+        logger.debug(f"Используется токен для запроса {path}, telegram_id={telegram_id}")
         session = await self._get_session(access_token=access_token)
 
         if path == "/habits/today":
+            # Используем GET /habits (реальный endpoint бэкенда) - получаем все привычки пользователя
             url = f"{self.base_url}/habits"
             try:
                 async with session.get(url) as response:
                     # Если 401, пытаемся обновить токен
-                    if response.status == 401 and telegram_id:
-                        # Пытаемся обновить access_token через refresh_token
-                        new_token = await self._refresh_access_token(telegram_id)
-                        if not new_token:
-                            # Если refresh_token истёк, перерегистрируемся
-                            new_token = await self._get_user_token(
-                                telegram_id=telegram_id,
-                                username=username,
-                                first_name=first_name,
-                                last_name=last_name,
-                                photo_url=photo_url
-                            )
-                        if not new_token:
-                            raise Exception("Токен истёк, не удалось обновить. Попробуйте отправить /start")
-                        await session.close()
-                        session = await self._get_session(access_token=new_token)
-                        async with session.get(url) as retry_response:
-                            retry_response.raise_for_status()
-                            habits = await retry_response.json()
+                    if response.status == 401:
+                        if telegram_id:
+                            logger.warning(f"Получен 401 для telegram_id={telegram_id}, пытаемся обновить токен")
+                            # Пытаемся обновить access_token через refresh_token
+                            new_token = await self._refresh_access_token(telegram_id)
+                            if not new_token:
+                                # Если refresh_token истёк, перерегистрируемся
+                                logger.info(f"Refresh token истек, перерегистрируем пользователя telegram_id={telegram_id}")
+                                new_token = await self._get_user_token(
+                                    telegram_id=telegram_id,
+                                    username=username,
+                                    first_name=first_name,
+                                    last_name=last_name,
+                                    photo_url=photo_url
+                                )
+                            if new_token:
+                                logger.info(f"Токен обновлен для telegram_id={telegram_id}, повторяем запрос")
+                                await session.close()
+                                session = await self._get_session(access_token=new_token)
+                                async with session.get(url) as retry_response:
+                                    if retry_response.status == 401:
+                                        raise Exception("Токен недействителен даже после обновления. Попробуйте отправить /start")
+                                    retry_response.raise_for_status()
+                                    habits = await retry_response.json()
+                            else:
+                                raise Exception("Токен истёк, не удалось обновить. Попробуйте отправить /start")
+                        else:
+                            raise Exception("Ошибка авторизации (401). Попробуйте отправить /start для регистрации")
                     else:
                         response.raise_for_status()
                         habits = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
+                logger.error(f"Ошибка API: {e}")
                 raise Exception(f"Ошибка API: {e}")
 
             if not isinstance(habits, list):
@@ -334,22 +427,29 @@ class API:
                 return {"habit": self._map_habit_from_backend(habit)}
 
         if path.startswith("/habits/") and path.endswith("/stats"):
+            # Используем GET /habits/{id} (реальный endpoint бэкенда) и обрабатываем на стороне бота
             parts = path.split("/")
             habit_id = int(parts[2])
             period = params.get("period", "week") if params else "week"
             return await self._habit_stats(user_id, habit_id, period, telegram_id)
 
         if path.startswith("/habits/") and path.endswith("/history"):
+            # Используем GET /habits/{id} (реальный endpoint бэкенда) и обрабатываем на стороне бота
             parts = path.split("/")
             habit_id = int(parts[2])
             period = params.get("period", "week") if params else "week"
             return await self._habit_history(user_id, habit_id, period, telegram_id)
 
         if path == "/habits/progress":
+            # Используем GET /habits (реальный endpoint бэкенда) и обрабатываем на стороне бота
             period = params.get("period", "week") if params else "week"
-            return await self._progress(user_id, period, telegram_id)
+            # user_id может быть None, поэтому используем telegram_id для получения user_id из хранилища
+            if not user_id and telegram_id:
+                user_id = await token_storage.get_user_id(telegram_id)
+            return await self._progress(user_id, period, telegram_id, username, first_name, last_name, photo_url)
 
         if path == "/telegram/settings":
+            # Используем GET /user/me/settings (реальный endpoint бэкенда)
             url = f"{self.base_url}/user/me/settings"
             try:
                 async with session.get(url) as response:
@@ -399,17 +499,47 @@ class API:
                     else:
                         response.raise_for_status()
                         settings = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
+                logger.error(f"Ошибка API: {e}")
                 raise Exception(f"Ошибка API: {e}")
 
             return {"settings": self._map_settings_from_backend(settings)}
 
         if path == "/telegram/users/check":
+            # Проверяем существование пользователя через GET /user/me (реальный endpoint бэкенда)
+            # Этот endpoint проверяет пользователя в основной БД бэкенда через токен
             telegram_id = params.get("telegram_id") if params else None
-            exists = bool(telegram_id or (self.user_id and self.access_token))
-            return {"exists": exists}
+            if telegram_id:
+                try:
+                    # Пытаемся получить токен и проверить через /user/me
+                    access_token = await token_storage.get_access_token(telegram_id)
+                    if access_token:
+                        check_session = await self._get_session(access_token=access_token)
+                        check_url = f"{self.base_url}/user/me"
+                        async with check_session.get(check_url) as check_response:
+                            if check_response.status == 200:
+                                # Пользователь существует в основной БД бэкенда
+                                return {"exists": True}
+                            elif check_response.status == 401:
+                                # Токен недействителен, но это не значит, что пользователя нет
+                                # Попробуем обновить токен
+                                new_token = await self._refresh_access_token(telegram_id)
+                                if new_token:
+                                    check_session = await self._get_session(access_token=new_token)
+                                    async with check_session.get(check_url) as retry_response:
+                                        if retry_response.status == 200:
+                                            return {"exists": True}
+                except Exception as e:
+                    logger.debug(f"Ошибка при проверке пользователя telegram_id={telegram_id}: {e}")
+            # Если токена нет или проверка не удалась, возвращаем False
+            # Это означает, что нужно вызвать /login/telegram для авторизации/регистрации
+            return {"exists": False}
 
         if path == "/telegram/registration-link":
             return {"url": f"{WEB_APP_URL}/register"}
@@ -478,6 +608,7 @@ class API:
             if not habit_id:
                 raise Exception("habit_id обязателен")
 
+            # Используем PATCH /habits/{id} с is_done: true (реальный endpoint бэкенда)
             url = f"{self.base_url}/habits/{habit_id}"
             payload = {"is_done": True}
 
@@ -507,9 +638,14 @@ class API:
                     else:
                         response.raise_for_status()
                         habit = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
+                logger.error(f"Ошибка API: {e}")
                 raise Exception(f"Ошибка API: {e}")
 
             mapped = self._map_habit_from_backend(habit)
@@ -522,6 +658,7 @@ class API:
             if not habit_id:
                 raise Exception("habit_id обязателен")
 
+            # Используем PATCH /habits/{id} с is_done: false (реальный endpoint бэкенда)
             url = f"{self.base_url}/habits/{habit_id}"
             payload = {
                 "is_done": False,
@@ -553,9 +690,14 @@ class API:
                     else:
                         response.raise_for_status()
                         habit = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
+                logger.error(f"Ошибка API: {e}")
                 raise Exception(f"Ошибка API: {e}")
 
             mapped = self._map_habit_from_backend(habit)
@@ -615,9 +757,14 @@ class API:
                     else:
                         response.raise_for_status()
                         habit = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
+                logger.error(f"Ошибка API: {e}")
                 raise Exception(f"Ошибка API: {e}")
             
             return {"habit": self._map_habit_from_backend(habit)}
@@ -699,6 +846,7 @@ class API:
             if not data:
                 raise Exception("enabled обязателен")
             enabled = data.get("enabled", True)
+            # Используем PATCH /user/me/settings с do_not_disturb (реальный endpoint бэкенда)
             payload = {"do_not_disturb": not enabled}
 
             url = f"{self.base_url}/user/me/settings"
@@ -728,9 +876,14 @@ class API:
                     else:
                         response.raise_for_status()
                         settings = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
+                logger.error(f"Ошибка API: {e}")
                 raise Exception(f"Ошибка API: {e}")
 
             return {"success": True, "settings": self._map_settings_from_backend(settings)}
@@ -742,6 +895,7 @@ class API:
             if not time_str:
                 raise Exception("time обязателен")
 
+            # Используем GET /user/me/settings для получения текущих настроек, затем PATCH для обновления
             settings_url = f"{self.base_url}/user/me/settings"
             try:
                 async with session.get(settings_url) as response:
@@ -767,9 +921,14 @@ class API:
                     else:
                         response.raise_for_status()
                         current_settings = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
+                logger.error(f"Ошибка API: {e}")
                 raise Exception(f"Ошибка API: {e}")
 
             notify_times: List[str] = current_settings.get("notify_times") or []
@@ -807,9 +966,62 @@ class API:
                     else:
                         response.raise_for_status()
                         settings = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
+                logger.error(f"Ошибка API: {e}")
+                raise Exception(f"Ошибка API: {e}")
+
+            return {"success": True, "settings": self._map_settings_from_backend(settings)}
+
+        if path == "/telegram/settings/notify-times":
+            if not data:
+                raise Exception("notify_times обязателен")
+            notify_times = data.get("notify_times")
+            if notify_times is None:
+                raise Exception("notify_times обязателен")
+
+            payload = {
+                "notify_times": notify_times,
+            }
+
+            url = f"{self.base_url}/user/me/settings"
+            try:
+                async with session.patch(url, json=payload) as response:
+                    if response.status == 401 and telegram_id:
+                        new_token = await self._refresh_access_token(telegram_id)
+                        if not new_token:
+                            new_token = await self._get_user_token(
+                                telegram_id=telegram_id,
+                                username=username,
+                                first_name=first_name,
+                                last_name=last_name,
+                                photo_url=photo_url
+                            )
+                        if new_token:
+                            if session and not session.closed:
+                                await session.close()
+                            session = await self._get_session(access_token=new_token)
+                            async with session.patch(url, json=payload) as retry_response:
+                                retry_response.raise_for_status()
+                                settings = await retry_response.json()
+                        else:
+                            raise Exception("Токен истёк, автоматическая перерегистрация не удалась. Попробуйте отправить /start")
+                    else:
+                        response.raise_for_status()
+                        settings = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
+            except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
+                raise Exception(f"Ошибка сети: {e}")
+            except Exception as e:
+                logger.error(f"Ошибка API: {e}")
                 raise Exception(f"Ошибка API: {e}")
 
             return {"success": True, "settings": self._map_settings_from_backend(settings)}
@@ -817,6 +1029,7 @@ class API:
         if path == "/telegram/settings/dnd":
             enabled = data.get("enabled", False) if data else False
 
+            # Используем PATCH /user/me/settings с do_not_disturb (реальный endpoint бэкенда)
             payload = {
                 "do_not_disturb": enabled,
             }
@@ -848,9 +1061,14 @@ class API:
                     else:
                         response.raise_for_status()
                         settings = await response.json()
+            except aiohttp.ClientConnectorError as e:
+                logger.error(f"Не удалось подключиться к серверу {self.base_url}: {e}")
+                raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
+                logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
+                logger.error(f"Ошибка API: {e}")
                 raise Exception(f"Ошибка API: {e}")
 
             return {"success": True, "settings": self._map_settings_from_backend(settings)}
@@ -894,14 +1112,25 @@ class API:
 
         value = h.get("value", 0) or 0
         is_done = h.get("is_done", False)
+        unit = h.get("unit") or ""
+        
+        backend_progress = h.get("progress") or h.get("current_value") or (value if is_done else 0)
+        
+        display_value = value
+        display_progress = backend_progress
+        display_unit = unit
+        if unit == "минут" and value >= 60 and value % 60 == 0:
+            display_value = value / 60
+            display_progress = backend_progress / 60
+            display_unit = "часов"
 
         return {
             "id": h.get("id"),
             "name": h.get("title", "Привычка"),
             "emoji": "📌",
-            "progress": value if is_done else 0,
-            "goal": value,
-            "unit": h.get("unit") or "",
+            "progress": display_progress,
+            "goal": display_value,
+            "unit": display_unit,
             "completed": is_done,
             "type": bot_type,
             "streak": h.get("series", 0),
@@ -931,6 +1160,7 @@ class API:
         return {
             "reminders_enabled": not dnd,
             "morning_time": morning_time,
+            "notify_times": notify_times,
             "dnd_enabled": dnd,
             "dnd_start": "22:00",
             "dnd_end": "08:00",
@@ -1118,19 +1348,24 @@ class API:
             "history": history,
         }
 
-    async def _progress(self, user_id: str, period: str, telegram_id: Optional[int] = None) -> Dict[str, Any]:
-        username = None
-        first_name = None
-        last_name = None
-        photo_url = None
+    async def _progress(self, user_id: Optional[str], period: str, telegram_id: Optional[int] = None,
+                      username: Optional[str] = None, first_name: Optional[str] = None,
+                      last_name: Optional[str] = None, photo_url: Optional[str] = None) -> Dict[str, Any]:
         access_token = None
         
         if telegram_id:
             # Пытаемся получить токен из кэша
             access_token = await token_storage.get_access_token(telegram_id)
             
+            # Если user_id не передан, получаем из хранилища
+            if not user_id:
+                stored_user_id = await token_storage.get_user_id(telegram_id)
+                if stored_user_id:
+                    user_id = str(stored_user_id)
+            
             # Если токена нет в кэше, регистрируемся
             if not access_token:
+                logger.info(f"Токен не найден для telegram_id={telegram_id}, регистрируем пользователя")
                 access_token = await self._get_user_token(
                     telegram_id=telegram_id,
                     username=username,
@@ -1140,12 +1375,17 @@ class API:
                 )
                 if not access_token:
                     raise Exception("Не удалось получить токен. Попробуйте отправить /start")
+                # Обновляем user_id после регистрации
+                stored_user_id = await token_storage.get_user_id(telegram_id)
+                if stored_user_id:
+                    user_id = str(stored_user_id)
+                logger.info(f"Пользователь зарегистрирован, user_id={user_id}, telegram_id={telegram_id}")
         
         if not access_token and self.access_token:
             access_token = self.access_token
         
         if not access_token:
-            raise Exception("Токен не доступен")
+            raise Exception("Токен не доступен. Попробуйте отправить /start для регистрации")
 
         # Создаём сессию с токеном
         session = await self._get_session(access_token=access_token)
@@ -1154,31 +1394,47 @@ class API:
         try:
             async with session.get(url) as response:
                 # Обработка 401 с обновлением токена
-                if response.status == 401 and telegram_id:
-                    new_token = await self._refresh_access_token(telegram_id)
-                    if not new_token:
-                        # Если refresh_token истёк, перерегистрируемся
-                        new_token = await self._get_user_token(
-                            telegram_id=telegram_id,
-                            username=username,
-                            first_name=first_name,
-                            last_name=last_name,
-                            photo_url=photo_url
-                        )
-                    if new_token:
-                        await session.close()
-                        session = await self._get_session(access_token=new_token)
-                        async with session.get(url) as retry_response:
-                            retry_response.raise_for_status()
-                            habits = await retry_response.json()
+                if response.status == 401:
+                    if telegram_id:
+                        logger.warning(f"Получен 401 при запросе прогресса для telegram_id={telegram_id}, обновляем токен")
+                        new_token = await self._refresh_access_token(telegram_id)
+                        if not new_token:
+                            # Если refresh_token истёк, перерегистрируемся
+                            logger.info(f"Refresh token истек или не получен, перерегистрируем пользователя telegram_id={telegram_id}")
+                            new_token = await self._get_user_token(
+                                telegram_id=telegram_id,
+                                username=username,
+                                first_name=first_name,
+                                last_name=last_name,
+                                photo_url=photo_url
+                            )
+                        if new_token:
+                            logger.info(f"Токен обновлен для telegram_id={telegram_id}, повторяем запрос прогресса")
+                            await session.close()
+                            session = await self._get_session(access_token=new_token)
+                            async with session.get(url) as retry_response:
+                                if retry_response.status == 401:
+                                    logger.error(f"Токен все еще недействителен после обновления для telegram_id={telegram_id}")
+                                    raise Exception("Токен недействителен даже после обновления. Попробуйте отправить /start")
+                                retry_response.raise_for_status()
+                                habits = await retry_response.json()
+                        else:
+                            logger.error(f"Не удалось обновить токен для telegram_id={telegram_id}")
+                            raise Exception("Токен истёк, не удалось обновить. Попробуйте отправить /start")
                     else:
-                        raise Exception("Токен истёк, требуется повторная регистрация")
+                        logger.error("Получен 401 без telegram_id при запросе прогресса")
+                        raise Exception("Ошибка авторизации (401). Попробуйте отправить /start для регистрации")
                 else:
                     response.raise_for_status()
                     habits = await response.json()
+        except aiohttp.ClientConnectorError as e:
+            logger.error(f"Не удалось подключиться к серверу {self.base_url} при запросе прогресса: {e}")
+            raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
         except aiohttp.ClientError as e:
+            logger.error(f"Ошибка сети при запросе прогресса к {self.base_url}: {e}")
             raise Exception(f"Ошибка сети: {e}")
         except Exception as e:
+            logger.error(f"Ошибка API при запросе прогресса: {e}")
             raise Exception(f"Ошибка API: {e}")
 
         mapped_habits = [self._map_habit_from_backend(h) for h in habits]
@@ -1270,6 +1526,7 @@ class API:
         session = await self._get_session(access_token=access_token)
         
         if path.startswith("/habits/delete/"):
+            # Исправляем путь: /habits/delete/{id} -> DELETE /habits/{id} (реальный endpoint бэкенда)
             parts = path.split("/")
             if len(parts) >= 4 and parts[3].isdigit():
                 habit_id = parts[3]
