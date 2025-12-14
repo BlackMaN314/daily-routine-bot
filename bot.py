@@ -7,6 +7,7 @@ from config import BOT_TOKEN, BACKEND_URL, NOTIFICATION_SERVER_HOST, NOTIFICATIO
 from services.api import api
 from services.token_storage import TokenStorage
 from services.notification_server import NotificationServer
+from services.notification_scheduler import NotificationScheduler
 
 from handlers import start, main_menu, habits_today, habit_actions, habit_manage, settings, profile, notifications
 
@@ -59,6 +60,8 @@ async def main():
     dp.include_router(notifications.router)
 
     notification_server = None
+    notification_scheduler = None
+    
     try:
         notification_server = NotificationServer(
             bot=bot,
@@ -69,6 +72,14 @@ async def main():
     except Exception as e:
         logger.error(f"Ошибка при запуске HTTP сервера уведомлений: {e}", exc_info=True)
         logger.warning("Бот будет работать без HTTP сервера уведомлений")
+    
+    try:
+        notification_scheduler = NotificationScheduler(bot=bot, check_interval=10)
+        await notification_scheduler.start()
+        logger.info("Планировщик уведомлений запущен (интервал проверки: 10 секунд)")
+    except Exception as e:
+        logger.error(f"Ошибка при запуске планировщика уведомлений: {e}", exc_info=True)
+        logger.warning("Бот будет работать без планировщика уведомлений")
 
     try:
         logger.info("Бот запущен и готов к работе")
@@ -77,6 +88,11 @@ async def main():
         logger.error(f"Ошибка при работе бота: {e}", exc_info=True)
     finally:
         logger.info("Закрываем соединения...")
+        if notification_scheduler:
+            try:
+                await notification_scheduler.stop()
+            except Exception as e:
+                logger.error(f"Ошибка при остановке планировщика: {e}")
         if notification_server:
             try:
                 await notification_server.stop()

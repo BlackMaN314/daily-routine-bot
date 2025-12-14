@@ -717,14 +717,15 @@ class API:
             if not title:
                 raise Exception("Название привычки обязательно")
             
-            backend_type = "time" if habit_type == "time" else "count"
+            backend_format = "time" if habit_type == "time" else "count"
+            backend_habit_type = "beneficial" if is_beneficial else "harmful"
             
             payload = {
                 "title": title,
-                "type": backend_type,
+                "format": backend_format,
                 "value": int(value),
                 "is_active": is_active,
-                "is_beneficial": is_beneficial
+                "type": backend_habit_type
             }
             
             if unit:
@@ -732,7 +733,14 @@ class API:
             
             url = f"{self.base_url}/habits"
             try:
+                logger.debug(f"Отправка запроса на создание привычки: {url}, payload: {payload}")
                 async with session.post(url, json=payload) as response:
+                    # Обработка 400 для детального логирования
+                    if response.status == 400:
+                        error_text = await response.text()
+                        logger.error(f"Ошибка 400 при создании привычки: {error_text}, payload: {payload}")
+                        raise Exception(f"Ошибка валидации: {error_text}")
+                    
                     # Обработка 401 с обновлением токена
                     if response.status == 401 and telegram_id:
                         new_token = await self._refresh_access_token(telegram_id)
@@ -762,6 +770,12 @@ class API:
                 raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
                 logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
+                # Если это ClientResponseError, получаем детали
+                if hasattr(e, 'status') and hasattr(e, 'message'):
+                    error_detail = f"Status: {e.status}, Message: {e.message}"
+                    if hasattr(e, 'request_info'):
+                        error_detail += f", URL: {e.request_info.url}"
+                    raise Exception(f"Ошибка сети: {error_detail}")
                 raise Exception(f"Ошибка сети: {e}")
             except Exception as e:
                 logger.error(f"Ошибка API: {e}")

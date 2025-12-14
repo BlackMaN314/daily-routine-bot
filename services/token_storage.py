@@ -152,5 +152,16 @@ class TokenStorage:
             tokens_data["refresh_token"] = refresh_token
             await self._save_tokens_data(telegram_id, tokens_data)
 
+    async def get_all_telegram_ids(self) -> list[int]:
+        """Получить список всех telegram_id из базы данных"""
+        await self._init_db()
+        telegram_ids = []
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute("SELECT telegram_id FROM tokens")
+            rows = await cursor.fetchall()
+            for row in rows:
+                telegram_ids.append(row[0])
+        return telegram_ids
+
 
 token_storage = TokenStorage()
