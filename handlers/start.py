@@ -14,8 +14,6 @@ async def cmd_start(message: types.Message, bot: Bot):
     
     user_id = message.from_user.id
     
-    # Всегда вызываем /login/telegram, который сам проверит существование пользователя
-    # в основной БД бэкенда и создаст/обновит его при необходимости
     try:
         photo_url = await get_user_photo_url(bot, user_id)
         user_data = await api.register_telegram_user(
@@ -48,7 +46,6 @@ async def cmd_start(message: types.Message, bot: Bot):
                 last_name=message.from_user.last_name,
                 photo_url=photo_url
             )
-            logger.info(f"Токены сохранены для telegram_id={user_id}, user_id={backend_user_id}")
         else:
             logger.error(f"Токены не получены при авторизации для telegram_id={user_id}")
         
@@ -145,8 +142,6 @@ async def check_registration(call: types.CallbackQuery, bot: Bot):
     user_id = call.from_user.id
     await call.answer()
     
-    # Всегда вызываем /login/telegram, который сам проверит существование пользователя
-    # в основной БД бэкенда и создаст/обновит его при необходимости
     try:
         photo_url = await get_user_photo_url(bot, user_id)
         
@@ -180,7 +175,6 @@ async def check_registration(call: types.CallbackQuery, bot: Bot):
                 last_name=call.from_user.last_name,
                 photo_url=photo_url
             )
-            logger.info(f"Токены сохранены для telegram_id={user_id}, user_id={backend_user_id}")
         else:
             logger.error(f"Токены не получены при авторизации для telegram_id={user_id}")
         

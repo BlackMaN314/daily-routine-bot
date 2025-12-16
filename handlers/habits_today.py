@@ -141,7 +141,6 @@ async def refresh_habits_callback(call: types.CallbackQuery):
                 )
             )
         except TelegramBadRequest as e2:
-            # Если не удалось отредактировать, просто отвечаем
             if "message is not modified" in str(e2).lower():
                 await call.answer("Список уже актуален ✅")
             else:

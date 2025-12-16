@@ -20,10 +20,7 @@ class API:
         self.access_token = BACKEND_ACCESS_TOKEN
         
         if not self.base_url:
-            logger.warning("BACKEND_URL не задан! Используется значение по умолчанию")
             self.base_url = "http://localhost:8000"
-        
-        logger.info(f"API инициализирован с базовым URL: {self.base_url}")
 
     async def _get_session(self, telegram_id: Optional[int] = None, force_new: bool = False, 
                           access_token: Optional[str] = None) -> aiohttp.ClientSession:
@@ -41,12 +38,8 @@ class API:
             headers = {}
             if access_token:
                 headers["Authorization"] = f"Bearer {access_token}"
-                logger.debug(f"Создана сессия с токеном для telegram_id={telegram_id}")
             elif self.access_token:
                 headers["Authorization"] = f"Bearer {self.access_token}"
-                logger.debug("Создана сессия с токеном из конфигурации")
-            else:
-                logger.warning("Создана сессия БЕЗ токена авторизации!")
             
             self.session = aiohttp.ClientSession(headers=headers)
         return self.session
@@ -69,13 +62,6 @@ class API:
     async def register_telegram_user(self, telegram_id: int, username: Optional[str] = None, 
                                      first_name: Optional[str] = None, last_name: Optional[str] = None,
                                      photo_url: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Авторизация/регистрация пользователя через /login/telegram.
-        Этот endpoint проверяет существование пользователя в основной БД бэкенда:
-        - Если пользователь существует - обновляет информацию и возвращает токены
-        - Если пользователь не существует - создает нового и возвращает токены
-        Всегда возвращает токены для авторизованного пользователя.
-        """
         telegram_data = {
             "id": str(telegram_id),
             "auth_date": str(int(time.time())),
@@ -136,30 +122,23 @@ class API:
         }
     
     async def _refresh_access_token(self, telegram_id: int) -> Optional[str]:
-        """Обновить access_token через refresh_token"""
         try:
             refresh_token = await token_storage.get_refresh_token(telegram_id)
             if not refresh_token:
-                logger.warning(f"Refresh token не найден для telegram_id={telegram_id}")
                 return None
             
-            logger.info(f"Обновляем access token для telegram_id={telegram_id}")
             url = f"{self.base_url}/auth/getaccesstoken"
             session = aiohttp.ClientSession()
             
             try:
                 async with session.post(url, json={"refresh_token": refresh_token}) as response:
                     if response.status == 401:
-                        logger.warning(f"Refresh token недействителен для telegram_id={telegram_id} (401)")
                         return None
                     response.raise_for_status()
                     data = await response.json()
                     new_access_token = data.get("access_token")
                     if new_access_token:
                         await token_storage.update_access_token(telegram_id, new_access_token)
-                        logger.info(f"Access token успешно обновлен для пользователя telegram_id={telegram_id}")
-                    else:
-                        logger.warning(f"Access token не получен в ответе для telegram_id={telegram_id}")
                     return new_access_token
             finally:
                 await session.close()
@@ -200,9 +179,7 @@ class API:
                               photo_url: Optional[str] = None) -> Optional[str]:
         access_token = await token_storage.get_access_token(telegram_id)
         if access_token:
-            logger.debug(f"Токен найден в хранилище для telegram_id={telegram_id}")
             return access_token
-        logger.info(f"Токен не найден для telegram_id={telegram_id}, регистрируем пользователя")
         try:
             auth_data = await self.register_telegram_user(
                 telegram_id=telegram_id,
@@ -227,7 +204,6 @@ class API:
                     last_name=last_name,
                     photo_url=photo_url
                 )
-                logger.info(f"Токены сохранены для пользователя telegram_id={telegram_id}, user_id={user_id}")
             else:
                 logger.error(f"Токены не получены при регистрации для telegram_id={telegram_id}")
                 return None
@@ -238,12 +214,6 @@ class API:
             return None
 
     async def check_connection(self) -> bool:
-        """
-        Проверить подключение к бэкенду
-        
-        Returns:
-            True если подключение успешно, False иначе
-        """
         try:
             session = aiohttp.ClientSession()
             try:

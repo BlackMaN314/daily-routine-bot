@@ -38,7 +38,6 @@ class NotificationServer:
                     status=400
                 )
             
-            # Преобразуем telegram_id в int, если это строка
             try:
                 telegram_id = int(telegram_id)
             except (ValueError, TypeError):
@@ -53,21 +52,17 @@ class NotificationServer:
                     status=400
                 )
             
-            # Парсим клавиатуру, если есть
             reply_markup = None
             keyboard_data = data.get("keyboard")
             if keyboard_data:
                 reply_markup = self._parse_keyboard(keyboard_data)
             
-            # Отправляем сообщение
             try:
                 sent_message = await self.bot.send_message(
                     chat_id=telegram_id,
                     text=message,
                     reply_markup=reply_markup
                 )
-                
-                logger.info(f"Уведомление отправлено пользователю {telegram_id}, message_id={sent_message.message_id}")
                 
                 return web.json_response({
                     "success": True,
@@ -76,8 +71,7 @@ class NotificationServer:
                 })
             
             except TelegramForbiddenError:
-                # Пользователь заблокировал бота
-                logger.warning(f"Пользователь {telegram_id} заблокировал бота")
+                pass
                 return web.json_response(
                     {
                         "error": "User blocked the bot",
@@ -148,18 +142,14 @@ class NotificationServer:
         return InlineKeyboardMarkup(inline_keyboard=inline_keyboard)
     
     async def start(self):
-        """Запуск HTTP сервера"""
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
         self.site = web.TCPSite(self.runner, self.host, self.port)
         await self.site.start()
-        logger.info(f"HTTP сервер для уведомлений запущен на {self.host}:{self.port}")
     
     async def stop(self):
-        """Остановка HTTP сервера"""
         if self.site:
             await self.site.stop()
         if self.runner:
             await self.runner.cleanup()
-        logger.info("HTTP сервер для уведомлений остановлен")
 

@@ -13,8 +13,6 @@ class TokenStorage:
         self._initialized = False
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
 
-        logger.info(f"Хранение токенов: SQLite ({self.db_path})")
-
     async def _init_db(self):
         if self._initialized:
             return
@@ -36,7 +34,6 @@ class TokenStorage:
             self._initialized = True
 
     async def _get_tokens_data(self, telegram_id: int) -> Optional[Dict]:
-        """Получить данные токенов из базы данных"""
         await self._init_db()
         async with aiosqlite.connect(self.db_path) as db:
             cursor = await db.execute(
@@ -54,13 +51,10 @@ class TokenStorage:
                     "last_name": row[5],
                     "photo_url": row[6]
                 }
-                logger.debug(f"Токены найдены в БД для telegram_id={telegram_id}, access_token={'есть' if tokens_data['access_token'] else 'нет'}")
                 return tokens_data
-        logger.debug(f"Токены не найдены в БД для telegram_id={telegram_id}")
         return None
 
     async def _save_tokens_data(self, telegram_id: int, tokens_data: Dict):
-        """Сохранить данные токенов в базу данных"""
         await self._init_db()
         async with aiosqlite.connect(self.db_path) as db:
             access_token = tokens_data.get("access_token")
@@ -85,7 +79,6 @@ class TokenStorage:
                 tokens_data.get("photo_url")
             ))
             await db.commit()
-            logger.info(f"Токены сохранены в БД для telegram_id={telegram_id}, user_id={user_id}")
 
     async def save_tokens(self, telegram_id: int, access_token: str, refresh_token: str, user_id: Optional[int] = None,
                     username: Optional[str] = None, first_name: Optional[str] = None, last_name: Optional[str] = None,
@@ -141,9 +134,6 @@ class TokenStorage:
         if tokens_data:
             tokens_data["access_token"] = access_token
             await self._save_tokens_data(telegram_id, tokens_data)
-            logger.info(f"Access token обновлен в хранилище для telegram_id={telegram_id}")
-        else:
-            logger.warning(f"Не удалось обновить access token для telegram_id={telegram_id}: токены не найдены в БД")
 
     async def update_tokens(self, telegram_id: int, access_token: str, refresh_token: str):
         tokens_data = await self._get_tokens_data(telegram_id)
@@ -153,7 +143,6 @@ class TokenStorage:
             await self._save_tokens_data(telegram_id, tokens_data)
 
     async def get_all_telegram_ids(self) -> list[int]:
-        """Получить список всех telegram_id из базы данных"""
         await self._init_db()
         telegram_ids = []
         async with aiosqlite.connect(self.db_path) as db:
