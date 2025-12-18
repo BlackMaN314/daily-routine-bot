@@ -1,6 +1,7 @@
 import logging
 import asyncio
 from datetime import datetime, timedelta
+import pytz
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramBadRequest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -48,12 +49,9 @@ class NotificationScheduler:
             if not telegram_ids:
                 return
             
-            current_time = datetime.now()
-            current_time_str = current_time.strftime("%H:%M")
-            
             for telegram_id in telegram_ids:
                 try:
-                    await self._check_user_notifications(telegram_id, current_time_str, current_time)
+                    await self._check_user_notifications(telegram_id)
                 except Exception as e:
                     logger.error(f"Ошибка при проверке уведомлений для пользователя {telegram_id}: {e}", exc_info=True)
                     continue
@@ -61,7 +59,7 @@ class NotificationScheduler:
         except Exception as e:
             logger.error(f"Ошибка при проверке уведомлений: {e}", exc_info=True)
     
-    async def _check_user_notifications(self, telegram_id: int, current_time_str: str, current_time: datetime):
+    async def _check_user_notifications(self, telegram_id: int):
         try:
             user_data = await token_storage.get_user_data(telegram_id)
             
@@ -150,12 +148,23 @@ class NotificationScheduler:
             if not notify_times:
                 return
             
+            timezone_str = settings.get("timezone", "UTC")
+            try:
+                user_tz = pytz.timezone(timezone_str)
+            except pytz.exceptions.UnknownTimeZoneError:
+                logger.warning(f"Неизвестный часовой пояс {timezone_str} для пользователя {telegram_id}, используем UTC")
+                user_tz = pytz.UTC
+            
+            utc_now = datetime.now(pytz.UTC)
+            user_time = utc_now.astimezone(user_tz)
+            current_time_str = user_time.strftime("%H:%M")
+            current_date = user_time.date()
+            
             if current_time_str not in notify_times:
                 return
             
             last_sent = self.last_sent_notifications.get(telegram_id, {})
             last_sent_date = last_sent.get(current_time_str)
-            current_date = current_time.date()
             
             if last_sent_date == current_date:
                 return
@@ -183,7 +192,7 @@ class NotificationScheduler:
             
             if telegram_id not in self.last_sent_notifications:
                 self.last_sent_notifications[telegram_id] = {}
-            self.last_sent_notifications[telegram_id][current_time_str] = current_time.date()
+            self.last_sent_notifications[telegram_id][current_time_str] = current_date
             
         except Exception as e:
             logger.error(f"Ошибка при проверке уведомлений для пользователя {telegram_id}: {e}", exc_info=True)

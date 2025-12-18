@@ -291,7 +291,6 @@ class API:
             await self.session.close()
             self.session = None
         
-        # Проверяем, что токен получен перед созданием сессии
         if not access_token:
             logger.warning(f"Токен не получен для telegram_id={telegram_id}, user_id={user_id}")
             if telegram_id:
@@ -303,18 +302,14 @@ class API:
         session = await self._get_session(access_token=access_token)
 
         if path == "/habits/today":
-            # Используем GET /habits (реальный endpoint бэкенда) - получаем все привычки пользователя
             url = f"{self.base_url}/habits"
             try:
                 async with session.get(url) as response:
-                    # Если 401, пытаемся обновить токен
                     if response.status == 401:
                         if telegram_id:
                             logger.warning(f"Получен 401 для telegram_id={telegram_id}, пытаемся обновить токен")
-                            # Пытаемся обновить access_token через refresh_token
                             new_token = await self._refresh_access_token(telegram_id)
                             if not new_token:
-                                # Если refresh_token истёк, перерегистрируемся
                                 logger.info(f"Refresh token истек, перерегистрируем пользователя telegram_id={telegram_id}")
                                 new_token = await self._get_user_token(
                                     telegram_id=telegram_id,
@@ -365,11 +360,9 @@ class API:
                     async with session.get(url) as response:
                         if response.status == 404:
                             raise Exception("Привычка не найдена")
-                        # Обработка 401 с обновлением токена
                         if response.status == 401 and telegram_id:
                             new_token = await self._refresh_access_token(telegram_id)
                             if not new_token:
-                                # Если refresh_token истёк, перерегистрируемся
                                 new_token = await self._get_user_token(
                                     telegram_id=telegram_id,
                                     username=username,
@@ -397,29 +390,24 @@ class API:
                 return {"habit": self._map_habit_from_backend(habit)}
 
         if path.startswith("/habits/") and path.endswith("/stats"):
-            # Используем GET /habits/{id} (реальный endpoint бэкенда) и обрабатываем на стороне бота
             parts = path.split("/")
             habit_id = int(parts[2])
             period = params.get("period", "week") if params else "week"
             return await self._habit_stats(user_id, habit_id, period, telegram_id)
 
         if path.startswith("/habits/") and path.endswith("/history"):
-            # Используем GET /habits/{id} (реальный endpoint бэкенда) и обрабатываем на стороне бота
             parts = path.split("/")
             habit_id = int(parts[2])
             period = params.get("period", "week") if params else "week"
             return await self._habit_history(user_id, habit_id, period, telegram_id)
 
         if path == "/habits/progress":
-            # Используем GET /habits (реальный endpoint бэкенда) и обрабатываем на стороне бота
             period = params.get("period", "week") if params else "week"
-            # user_id может быть None, поэтому используем telegram_id для получения user_id из хранилища
             if not user_id and telegram_id:
                 user_id = await token_storage.get_user_id(telegram_id)
             return await self._progress(user_id, period, telegram_id, username, first_name, last_name, photo_url)
 
         if path == "/telegram/settings":
-            # Используем GET /user/me/settings (реальный endpoint бэкенда)
             url = f"{self.base_url}/user/me/settings"
             try:
                 async with session.get(url) as response:
@@ -449,10 +437,9 @@ class API:
                             raise Exception("Токен истёк, автоматическое обновление не удалось. Попробуйте отправить /start")
                         await session.close()
                         session = await self._get_session(access_token=new_token)
-                        async with session.get(url) as retry_response:
-                            if retry_response.status == 404:
-                                # Пытаемся создать настройки
-                                create_url = f"{self.base_url}/user/me/settings"
+                            async with session.get(url) as retry_response:
+                                if retry_response.status == 404:
+                                    create_url = f"{self.base_url}/user/me/settings"
                                 async with session.put(create_url, json={}) as create_response:
                                     if create_response.status in [200, 201]:
                                         settings = await create_response.json()
@@ -482,23 +469,17 @@ class API:
             return {"settings": self._map_settings_from_backend(settings)}
 
         if path == "/telegram/users/check":
-            # Проверяем существование пользователя через GET /user/me (реальный endpoint бэкенда)
-            # Этот endpoint проверяет пользователя в основной БД бэкенда через токен
             telegram_id = params.get("telegram_id") if params else None
             if telegram_id:
                 try:
-                    # Пытаемся получить токен и проверить через /user/me
                     access_token = await token_storage.get_access_token(telegram_id)
                     if access_token:
                         check_session = await self._get_session(access_token=access_token)
                         check_url = f"{self.base_url}/user/me"
                         async with check_session.get(check_url) as check_response:
                             if check_response.status == 200:
-                                # Пользователь существует в основной БД бэкенда
                                 return {"exists": True}
                             elif check_response.status == 401:
-                                # Токен недействителен, но это не значит, что пользователя нет
-                                # Попробуем обновить токен
                                 new_token = await self._refresh_access_token(telegram_id)
                                 if new_token:
                                     check_session = await self._get_session(access_token=new_token)
@@ -507,8 +488,6 @@ class API:
                                             return {"exists": True}
                 except Exception as e:
                     logger.debug(f"Ошибка при проверке пользователя telegram_id={telegram_id}: {e}")
-            # Если токена нет или проверка не удалась, возвращаем False
-            # Это означает, что нужно вызвать /login/telegram для авторизации/регистрации
             return {"exists": False}
 
         if path == "/telegram/registration-link":
@@ -534,16 +513,13 @@ class API:
         last_name = data.get("last_name")
         photo_url = data.get("photo_url")
         
-        # Получаем токен из кэша или регистрируемся
         access_token = None
         user_id = self.user_id
         
         if telegram_id:
-            # Пытаемся получить токен из кэша
             access_token = await token_storage.get_access_token(telegram_id)
             user_id = await token_storage.get_user_id(telegram_id)
             
-            # Если токена нет в кэше, регистрируемся
             if not access_token:
                 access_token = await self._get_user_token(
                     telegram_id=telegram_id,
@@ -564,7 +540,6 @@ class API:
         if not access_token:
             raise Exception("Токен не доступен")
 
-        # Закрываем старую сессию и создаём новую с токеном
         if self.session and not self.session.closed:
             await self.session.close()
             self.session = None
@@ -578,17 +553,14 @@ class API:
             if not habit_id:
                 raise Exception("habit_id обязателен")
 
-            # Используем PATCH /habits/{id} с is_done: true (реальный endpoint бэкенда)
             url = f"{self.base_url}/habits/{habit_id}"
             payload = {"is_done": True}
 
             try:
                 async with session.patch(url, json=payload) as response:
-                    # Обработка 401 с обновлением токена
                     if response.status == 401 and telegram_id:
                         new_token = await self._refresh_access_token(telegram_id)
                         if not new_token:
-                            # Если refresh_token истёк, перерегистрируемся
                             new_token = await self._get_user_token(
                                 telegram_id=telegram_id,
                                 username=username,
@@ -628,7 +600,6 @@ class API:
             if not habit_id:
                 raise Exception("habit_id обязателен")
 
-            # Используем PATCH /habits/{id} с is_done: false (реальный endpoint бэкенда)
             url = f"{self.base_url}/habits/{habit_id}"
             payload = {
                 "is_done": False,
@@ -636,11 +607,9 @@ class API:
 
             try:
                 async with session.patch(url, json=payload) as response:
-                    # Обработка 401 с обновлением токена
                     if response.status == 401 and telegram_id:
                         new_token = await self._refresh_access_token(telegram_id)
                         if not new_token:
-                            # Если refresh_token истёк, перерегистрируемся
                             new_token = await self._get_user_token(
                                 telegram_id=telegram_id,
                                 username=username,
@@ -705,17 +674,14 @@ class API:
             try:
                 logger.debug(f"Отправка запроса на создание привычки: {url}, payload: {payload}")
                 async with session.post(url, json=payload) as response:
-                    # Обработка 400 для детального логирования
                     if response.status == 400:
                         error_text = await response.text()
                         logger.error(f"Ошибка 400 при создании привычки: {error_text}, payload: {payload}")
                         raise Exception(f"Ошибка валидации: {error_text}")
                     
-                    # Обработка 401 с обновлением токена
                     if response.status == 401 and telegram_id:
                         new_token = await self._refresh_access_token(telegram_id)
                         if not new_token:
-                            # Если refresh_token истёк, перерегистрируемся
                             new_token = await self._get_user_token(
                                 telegram_id=telegram_id,
                                 username=username,
@@ -740,7 +706,6 @@ class API:
                 raise Exception(f"Не удалось подключиться к серверу. Проверь, что бэкенд запущен на {self.base_url}")
             except aiohttp.ClientError as e:
                 logger.error(f"Ошибка сети при запросе к {self.base_url}: {e}")
-                # Если это ClientResponseError, получаем детали
                 if hasattr(e, 'status') and hasattr(e, 'message'):
                     error_detail = f"Status: {e.status}, Message: {e.message}"
                     if hasattr(e, 'request_info'):
@@ -756,7 +721,6 @@ class API:
         url = f"{self.base_url}{path}"
         try:
             async with session.post(url, json=data) as response:
-                # Обработка 401 с перерегистрацией
                 if response.status == 401 and telegram_id:
                     new_token = await self._get_user_token(
                         telegram_id=telegram_id,
@@ -789,16 +753,13 @@ class API:
         last_name = data.get("last_name")
         photo_url = data.get("photo_url")
         
-        # Получаем токен из кэша или регистрируемся
         access_token = None
         user_id = self.user_id
         
         if telegram_id:
-            # Пытаемся получить токен из кэша
             access_token = await token_storage.get_access_token(telegram_id)
             user_id = await token_storage.get_user_id(telegram_id)
             
-            # Если токена нет в кэше, регистрируемся
             if not access_token:
                 access_token = await self._get_user_token(
                     telegram_id=telegram_id,
@@ -819,7 +780,6 @@ class API:
         if not access_token:
             raise Exception("Токен не доступен")
 
-        # Закрываем старую сессию и создаём новую с токеном
         if self.session and not self.session.closed:
             await self.session.close()
             self.session = None
@@ -830,17 +790,14 @@ class API:
             if not data:
                 raise Exception("enabled обязателен")
             enabled = data.get("enabled", True)
-            # Используем PATCH /user/me/settings с do_not_disturb (реальный endpoint бэкенда)
             payload = {"do_not_disturb": not enabled}
 
             url = f"{self.base_url}/user/me/settings"
             try:
                 async with session.patch(url, json=payload) as response:
-                    # Обработка 401 с обновлением токена
                     if response.status == 401 and telegram_id:
                         new_token = await self._refresh_access_token(telegram_id)
                         if not new_token:
-                            # Если refresh_token истёк, перерегистрируемся
                             new_token = await self._get_user_token(
                                 telegram_id=telegram_id,
                                 username=username,
@@ -879,7 +836,6 @@ class API:
             if not time_str:
                 raise Exception("time обязателен")
 
-            # Используем GET /user/me/settings для получения текущих настроек, затем PATCH для обновления
             settings_url = f"{self.base_url}/user/me/settings"
             try:
                 async with session.get(settings_url) as response:
@@ -926,11 +882,9 @@ class API:
             url = settings_url
             try:
                 async with session.patch(url, json=payload) as response:
-                    # Обработка 401 с обновлением токена
                     if response.status == 401 and telegram_id:
                         new_token = await self._refresh_access_token(telegram_id)
                         if not new_token:
-                            # Если refresh_token истёк, перерегистрируемся
                             new_token = await self._get_user_token(
                                 telegram_id=telegram_id,
                                 username=username,
@@ -1013,7 +967,6 @@ class API:
         if path == "/telegram/settings/dnd":
             enabled = data.get("enabled", False) if data else False
 
-            # Используем PATCH /user/me/settings с do_not_disturb (реальный endpoint бэкенда)
             payload = {
                 "do_not_disturb": enabled,
             }
@@ -1021,11 +974,9 @@ class API:
             url = f"{self.base_url}/user/me/settings"
             try:
                 async with session.patch(url, json=payload) as response:
-                    # Обработка 401 с обновлением токена
                     if response.status == 401 and telegram_id:
                         new_token = await self._refresh_access_token(telegram_id)
                         if not new_token:
-                            # Если refresh_token истёк, перерегистрируемся
                             new_token = await self._get_user_token(
                                 telegram_id=telegram_id,
                                 username=username,
@@ -1134,12 +1085,14 @@ class API:
                 "dnd_enabled": False,
                 "dnd_start": "22:00",
                 "dnd_end": "08:00",
+                "timezone": "UTC",
             }
 
         notify_times: List[str] = s.get("notify_times") or []
         morning_time = notify_times[0] if notify_times else "08:00"
 
         dnd = s.get("do_not_disturb", False)
+        timezone = s.get("timezone", "UTC")
 
         return {
             "reminders_enabled": not dnd,
@@ -1148,6 +1101,7 @@ class API:
             "dnd_enabled": dnd,
             "dnd_start": "22:00",
             "dnd_end": "08:00",
+            "timezone": timezone,
         }
 
     async def _habit_stats(self, user_id: str, habit_id: int, period: str, telegram_id: Optional[int] = None) -> Dict[str, Any]:
@@ -1156,14 +1110,11 @@ class API:
         last_name = None
         photo_url = None
         
-        # Получаем токен из кэша или регистрируемся
         access_token = None
         
         if telegram_id:
-            # Пытаемся получить токен из кэша
             access_token = await token_storage.get_access_token(telegram_id)
             
-            # Если токена нет в кэше, регистрируемся
             if not access_token:
                 access_token = await self._get_user_token(
                     telegram_id=telegram_id,
@@ -1181,17 +1132,14 @@ class API:
         if not access_token:
             raise Exception("Токен не доступен")
 
-        # Создаём сессию с токеном
         session = await self._get_session(access_token=access_token)
         url = f"{self.base_url}/habits/{habit_id}"
 
         try:
             async with session.get(url) as response:
-                # Обработка 401 с обновлением токена
                 if response.status == 401 and telegram_id:
                     new_token = await self._refresh_access_token(telegram_id)
                     if not new_token:
-                        # Если refresh_token истёк, перерегистрируемся
                         new_token = await self._get_user_token(
                             telegram_id=telegram_id,
                             username=username,
@@ -1247,10 +1195,8 @@ class API:
         access_token = None
         
         if telegram_id:
-            # Пытаемся получить токен из кэша
             access_token = await token_storage.get_access_token(telegram_id)
             
-            # Если токена нет в кэше, регистрируемся
             if not access_token:
                 access_token = await self._get_user_token(
                     telegram_id=telegram_id,
@@ -1268,17 +1214,14 @@ class API:
         if not access_token:
             raise Exception("Токен не доступен")
 
-        # Создаём сессию с токеном
         session = await self._get_session(access_token=access_token)
         url = f"{self.base_url}/habits/{habit_id}"
 
         try:
             async with session.get(url) as response:
-                # Обработка 401 с обновлением токена
                 if response.status == 401 and telegram_id:
                     new_token = await self._refresh_access_token(telegram_id)
                     if not new_token:
-                        # Если refresh_token истёк, перерегистрируемся
                         new_token = await self._get_user_token(
                             telegram_id=telegram_id,
                             username=username,
@@ -1338,16 +1281,13 @@ class API:
         access_token = None
         
         if telegram_id:
-            # Пытаемся получить токен из кэша
             access_token = await token_storage.get_access_token(telegram_id)
             
-            # Если user_id не передан, получаем из хранилища
             if not user_id:
                 stored_user_id = await token_storage.get_user_id(telegram_id)
                 if stored_user_id:
                     user_id = str(stored_user_id)
             
-            # Если токена нет в кэше, регистрируемся
             if not access_token:
                 logger.info(f"Токен не найден для telegram_id={telegram_id}, регистрируем пользователя")
                 access_token = await self._get_user_token(
@@ -1359,7 +1299,6 @@ class API:
                 )
                 if not access_token:
                     raise Exception("Не удалось получить токен. Попробуйте отправить /start")
-                # Обновляем user_id после регистрации
                 stored_user_id = await token_storage.get_user_id(telegram_id)
                 if stored_user_id:
                     user_id = str(stored_user_id)
@@ -1371,19 +1310,16 @@ class API:
         if not access_token:
             raise Exception("Токен не доступен. Попробуйте отправить /start для регистрации")
 
-        # Создаём сессию с токеном
         session = await self._get_session(access_token=access_token)
         url = f"{self.base_url}/habits"
 
         try:
             async with session.get(url) as response:
-                # Обработка 401 с обновлением токена
                 if response.status == 401:
                     if telegram_id:
                         logger.warning(f"Получен 401 при запросе прогресса для telegram_id={telegram_id}, обновляем токен")
                         new_token = await self._refresh_access_token(telegram_id)
                         if not new_token:
-                            # Если refresh_token истёк, перерегистрируемся
                             logger.info(f"Refresh token истек или не получен, перерегистрируем пользователя telegram_id={telegram_id}")
                             new_token = await self._get_user_token(
                                 telegram_id=telegram_id,
@@ -1510,7 +1446,6 @@ class API:
         session = await self._get_session(access_token=access_token)
         
         if path.startswith("/habits/delete/"):
-            # Исправляем путь: /habits/delete/{id} -> DELETE /habits/{id} (реальный endpoint бэкенда)
             parts = path.split("/")
             if len(parts) >= 4 and parts[3].isdigit():
                 habit_id = parts[3]
