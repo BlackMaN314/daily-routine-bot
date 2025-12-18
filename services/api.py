@@ -437,9 +437,9 @@ class API:
                             raise Exception("Токен истёк, автоматическое обновление не удалось. Попробуйте отправить /start")
                         await session.close()
                         session = await self._get_session(access_token=new_token)
-                            async with session.get(url) as retry_response:
-                                if retry_response.status == 404:
-                                    create_url = f"{self.base_url}/user/me/settings"
+                        async with session.get(url) as retry_response:
+                            if retry_response.status == 404:
+                                create_url = f"{self.base_url}/user/me/settings"
                                 async with session.put(create_url, json={}) as create_response:
                                     if create_response.status in [200, 201]:
                                         settings = await create_response.json()
